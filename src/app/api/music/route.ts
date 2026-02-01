@@ -388,6 +388,16 @@ export async function POST(request: NextRequest) {
           );
         }
 
+        // 添加缓存支持
+        const qualityKey = quality || '320k';
+        const idsKey = Array.isArray(ids) ? ids.join(',') : ids;
+        const cacheKey = `parse-${platform}-${idsKey}-${qualityKey}`;
+        const cached = serverCache.proxyRequests.get(cacheKey);
+
+        if (cached && Date.now() - cached.timestamp < serverCache.CACHE_DURATION) {
+          return NextResponse.json(cached.data);
+        }
+
         try {
           const response = await proxyRequest(`${baseUrl}/v1/parse`, {
             method: 'POST',
@@ -398,7 +408,7 @@ export async function POST(request: NextRequest) {
             body: JSON.stringify({
               platform,
               ids,
-              quality: quality || '320k',
+              quality: qualityKey,
             }),
           });
 
@@ -413,6 +423,9 @@ export async function POST(request: NextRequest) {
               error: data.error || data.message || '解析失败',
             });
           }
+
+          // 缓存成功的解析结果
+          serverCache.proxyRequests.set(cacheKey, { data, timestamp: Date.now() });
 
           return NextResponse.json(data);
         } catch (error) {

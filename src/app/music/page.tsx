@@ -40,6 +40,18 @@ interface Playlist {
   updateFrequency?: string;
 }
 
+interface DbRecord {
+  platform: 'netease' | 'qq' | 'kuwo';
+  id: string;
+  play_time: number;
+  duration: number;
+  save_time: number;
+  name: string;
+  artist: string;
+  album?: string;
+  pic?: string;
+}
+
 export default function MusicPage() {
   const router = useRouter();
   const [currentSource, setCurrentSource] = useState<'netease' | 'qq' | 'kuwo'>('netease');
@@ -115,63 +127,119 @@ export default function MusicPage() {
     localStorage.setItem('musicPlayState', JSON.stringify(playState));
   };
 
-  // 从 localStorage 恢复播放状态
+  // 从 localStorage 恢复播放状态（已废弃，现在统一使用数据库）
   const restorePlayState = async () => {
-    try {
-      const saved = localStorage.getItem('musicPlayState');
-      if (!saved) return;
+    // 此函数已不再使用，所有状态恢复都在 initializePlayState 中完成
+  };
 
-      const playState = JSON.parse(saved);
+  // 页面加载时恢复播放状态和数据库记录
+  useEffect(() => {
+    const initializePlayState = async () => {
+      try {
+        console.log('=== 开始同步加载数据库记录 ===');
 
-      setCurrentSong(playState.currentSong);
-      setCurrentSongIndex(playState.currentSongIndex);
-      setSongs(playState.songs || []);
-      setCurrentPlaylistTitle(playState.currentPlaylistTitle || '');
-      setCurrentSource(playState.currentSource || 'netease');
-      setCurrentView(playState.currentView || 'playlists');
-      setQuality(playState.quality || '320k');
-      setPlayMode(playState.playMode || 'loop');
-      setVolume(playState.volume || 100);
-      setLyrics(playState.lyrics || []);
-      setPlayRecords(playState.playRecords || []);
-      setPlaylist(playState.playlist || []); // 恢复播放列表
+        // 1. 直接从 API 同步加载播放记录（阻塞等待，不使用缓存）
+        const response = await fetch('/api/music/playrecords');
+        const dbRecords = await response.json();
 
-      // 恢复 playlistIndex，如果没有则设置为 -1
-      const restoredIndex = playState.playlistIndex ?? -1;
-      setPlaylistIndex(restoredIndex);
+        console.log('=== 数据库原始数据 ===');
+        console.log('dbRecords:', dbRecords);
 
-      // 保存需要恢复的时间点
-      restoredTimeRef.current = playState.currentTime || 0;
+        // 将数据库记录转换为前端格式
+        const records: PlayRecord[] = [];
+        const songs: Song[] = [];
 
-      if (playState.currentSong) {
-        setShowPlayer(true);
+        Object.entries(dbRecords).forEach(([key, record]) => {
+          const dbRecord = record as DbRecord;
+          console.log('处理记录:', key, dbRecord);
+          records.push({
+            platform: dbRecord.platform,
+            id: dbRecord.id,
+            playTime: dbRecord.play_time,
+            duration: dbRecord.duration,
+            timestamp: dbRecord.save_time,
+          });
 
-        // 记录歌曲开始播放的时间（恢复时也需要设置）
-        songStartTimeRef.current = Date.now();
+          songs.push({
+            id: dbRecord.id,
+            name: dbRecord.name,
+            artist: dbRecord.artist,
+            album: dbRecord.album,
+            pic: dbRecord.pic,
+            platform: dbRecord.platform,
+          });
+        });
 
-        // 获取歌曲的平台信息
-        const platform = playState.currentSong.platform || playState.currentSource || 'netease';
+        // 按 save_time 倒序排序
+        const sortedIndices = records
+          .map((record, index) => ({ record, index }))
+          .sort((a, b) => b.record.timestamp - a.record.timestamp);
 
-        // 重新解析歌曲获取新的播放链接
-        try {
-          const response = await fetch('/api/music', {
+        const sortedRecords = sortedIndices.map(item => records[item.index]);
+        const sortedSongs = sortedIndices.map(item => songs[item.index]);
+
+        // 2. 更新播放列表
+        if (sortedRecords.length > 0) {
+          setPlayRecords(sortedRecords);
+          setPlaylist(sortedSongs);
+        }
+
+        // 3. 获取 localStorage 配置（只获取配置，不获取歌曲信息）
+        const savedPlayState = localStorage.getItem('musicPlayState');
+        const playState = savedPlayState ? JSON.parse(savedPlayState) : {};
+
+        // 恢复配置状态（不包括歌曲）
+        setSongs(playState.songs || []);
+        setCurrentPlaylistTitle(playState.currentPlaylistTitle || '');
+        setCurrentSource(playState.currentSource || 'netease');
+        setCurrentView(playState.currentView || 'playlists');
+        setQuality(playState.quality || '320k');
+        setPlayMode(playState.playMode || 'loop');
+        setVolume(playState.volume || 100);
+
+        // 4. 使用数据库的最新记录（歌曲和进度都从数据库获取）
+        if (sortedRecords.length > 0) {
+          const latestDbRecord = sortedRecords[0];
+          const latestDbSong = sortedSongs[0];
+
+          console.log('=== 从数据库加载歌曲 ===');
+          console.log('数据库最新歌曲:', latestDbSong);
+          console.log('数据库播放进度:', latestDbRecord.playTime);
+          console.log('数据库保存时间:', new Date(latestDbRecord.timestamp).toLocaleString());
+
+          // 使用数据库的歌曲信息
+          setCurrentSong(latestDbSong);
+          setPlaylistIndex(0);
+          setShowPlayer(true);
+
+          // 从数据库恢复播放进度
+          const dbPlayTime = latestDbRecord.playTime || 0;
+          songStartTimeRef.current = Date.now();
+
+          // 5. 同步解析歌曲获取播放链接（阻塞等待）
+          const platform = latestDbSong.platform || 'netease';
+
+          console.log('开始解析歌曲:', platform, latestDbSong.id);
+
+          const parseResponse = await fetch('/api/music', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               action: 'parse',
               platform: platform,
-              ids: playState.currentSong.id,
+              ids: latestDbSong.id,
               quality: playState.quality || '320k',
             }),
           });
 
-          const data = await response.json();
+          const data = await parseResponse.json();
+
+          console.log('解析结果:', data);
 
           if (data.code === 0 && data.data?.data && data.data.data.length > 0) {
             const songData = data.data.data[0];
 
             if (songData.url && songData.success) {
-              // 对于酷我音乐，使用代理
               let playUrl = songData.url;
               if (platform === 'kuwo') {
                 playUrl = `/api/music/proxy?url=${encodeURIComponent(songData.url)}`;
@@ -179,87 +247,27 @@ export default function MusicPage() {
 
               setCurrentSongUrl(songData.url);
 
-              // 延迟设置音频源，等待 audio 元素加载
-              setTimeout(() => {
-                if (audioRef.current) {
-                  audioRef.current.src = playUrl;
+              if (songData.lyrics) {
+                const parsedLyrics = parseLyric(songData.lyrics);
+                setLyrics(parsedLyrics);
+              }
 
-                  // 监听多个事件以确保进度恢复
-                  const restoreTime = () => {
-                    if (audioRef.current && restoredTimeRef.current > 0) {
-                      audioRef.current.currentTime = restoredTimeRef.current;
-                      restoredTimeRef.current = 0;
-                    }
-                  };
+              console.log('设置音频源:', playUrl);
+              console.log('恢复播放进度:', dbPlayTime);
 
-                  // 监听加载完成事件
-                  audioRef.current.addEventListener('loadedmetadata', restoreTime, { once: true });
-                  audioRef.current.addEventListener('canplay', restoreTime, { once: true });
+              // 6. 等待所有数据准备好后，再设置音频源和进度
+              if (audioRef.current) {
+                audioRef.current.src = playUrl;
 
-                  // 调用 load() 触发音频加载
-                  audioRef.current.load();
-                }
-              }, 100);
-            }
-          }
-        } catch (error) {
-          console.error('重新解析歌曲失败:', error);
-        }
-      }
-    } catch (error) {
-      console.error('恢复播放状态失败:', error);
-    }
-  };
+                const restoreTime = () => {
+                  if (audioRef.current && dbPlayTime > 0) {
+                    audioRef.current.currentTime = dbPlayTime;
+                    console.log('播放进度已恢复:', audioRef.current.currentTime);
+                  }
+                };
 
-  // 页面加载时恢复播放状态和数据库记录
-  useEffect(() => {
-    const initializePlayState = async () => {
-      // 先恢复 localStorage 中的播放状态
-      restorePlayState();
-
-      // 从数据库加载播放记录
-      try {
-        const dbRecords = await getAllMusicPlayRecords();
-
-        // 将数据库记录转换为前端格式
-        const records: PlayRecord[] = [];
-        const songs: Song[] = [];
-
-        Object.entries(dbRecords).forEach(([key, record]) => {
-          records.push({
-            platform: record.platform,
-            id: record.id,
-            playTime: record.play_time,
-            duration: record.duration,
-            timestamp: record.save_time,
-          });
-
-          songs.push({
-            id: record.id,
-            name: record.name,
-            artist: record.artist,
-            album: record.album,
-            pic: record.pic,
-            platform: record.platform, // 添加平台信息
-          });
-        });
-
-        // 更新状态
-        if (records.length > 0) {
-          setPlayRecords(records);
-          setPlaylist(songs);
-
-          // 如果当前有正在播放的歌曲，找到它在记录中的索引
-          const savedPlayState = localStorage.getItem('musicPlayState');
-          if (savedPlayState) {
-            const playState = JSON.parse(savedPlayState);
-            if (playState.currentSong) {
-              const platform = playState.currentSong.platform || playState.currentSource || 'netease';
-              const currentIndex = records.findIndex(
-                r => r.platform === platform && r.id === playState.currentSong.id
-              );
-              if (currentIndex >= 0) {
-                setPlaylistIndex(currentIndex);
+                audioRef.current.addEventListener('loadedmetadata', restoreTime, { once: true });
+                audioRef.current.load();
               }
             }
           }
@@ -380,7 +388,7 @@ export default function MusicPage() {
       setPlayRecords(prev => {
         const existingIndex = prev.findIndex(r => r.platform === record.platform && r.id === record.id);
         if (existingIndex >= 0) {
-          // 记录已存在，更新时间戳
+          // 记录已存在，更新时间戳但不重置播放时间
           const updated = [...prev];
           updated[existingIndex] = {
             ...updated[existingIndex],
@@ -544,8 +552,9 @@ export default function MusicPage() {
   // 上一曲
   const playPrev = () => {
     // 优先从播放列表切换
-    if (playlist.length > 0 && playlistIndex > 0) {
-      const prevIndex = playlistIndex - 1;
+    if (playlist.length > 0) {
+      // 如果已经是第一首，循环到最后一首
+      const prevIndex = playlistIndex > 0 ? playlistIndex - 1 : playlist.length - 1;
       setPlaylistIndex(prevIndex);
       playSong(playlist[prevIndex], -1);
     } else if (currentSongIndex > 0) {
@@ -556,8 +565,9 @@ export default function MusicPage() {
   // 下一曲
   const playNext = () => {
     // 优先从播放列表切换
-    if (playlist.length > 0 && playlistIndex < playlist.length - 1) {
-      const nextIndex = playlistIndex + 1;
+    if (playlist.length > 0) {
+      // 如果已经是最后一首，循环到第一首
+      const nextIndex = playlistIndex < playlist.length - 1 ? playlistIndex + 1 : 0;
       setPlaylistIndex(nextIndex);
       playSong(playlist[nextIndex], -1);
     } else if (currentSongIndex < songs.length - 1) {
@@ -732,8 +742,15 @@ export default function MusicPage() {
         audio.currentTime = 0;
         audio.play();
       } else if (playMode === 'random') {
-        const randomIndex = Math.floor(Math.random() * songs.length);
-        playSong(songs[randomIndex], randomIndex);
+        // 优先从播放列表中随机选择
+        if (playlist.length > 0) {
+          const randomIndex = Math.floor(Math.random() * playlist.length);
+          setPlaylistIndex(randomIndex);
+          playSong(playlist[randomIndex], -1);
+        } else if (songs.length > 0) {
+          const randomIndex = Math.floor(Math.random() * songs.length);
+          playSong(songs[randomIndex], randomIndex);
+        }
       } else {
         playNext();
       }
@@ -1290,7 +1307,11 @@ export default function MusicPage() {
                   )}
                 </button>
                 {/* 音量控制 */}
-                <div className="relative group">
+                <div
+                  className="relative"
+                  onMouseEnter={() => setShowVolumeSlider(true)}
+                  onMouseLeave={() => setShowVolumeSlider(false)}
+                >
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -1305,7 +1326,7 @@ export default function MusicPage() {
                   </button>
                   {/* 垂直音量条 - 桌面悬浮/移动端点击 */}
                   <div
-                    className={`absolute bottom-full left-1/2 -translate-x-1/2 pb-2 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:pointer-events-auto ${showVolumeSlider ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+                    className={`absolute bottom-full left-1/2 -translate-x-1/2 pb-2 transition-opacity ${showVolumeSlider ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="bg-zinc-800/95 backdrop-blur-sm rounded-lg p-3 shadow-xl border border-white/10">
